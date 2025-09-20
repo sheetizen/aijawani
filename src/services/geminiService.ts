@@ -54,3 +54,9 @@ export const generateImages = async (prompt: string, numberOfImages: number, asp
   const result = await callGeminiApi('generateImages', { prompt, numberOfImages, aspectRatio });
   return result.images || [];
 };
+
+export const generateWithReference = async (prompt: string, imageFiles: File[]): Promise<{ image: string | null; text: string | null }> => {
+  const imagePromises = imageFiles.map(file => fileToBase64(file));
+  const imagesBase64 = await Promise.all(imagePromises);
+  return callGeminiApi('generateWithReference', { prompt, images: imagesBase64 });
+};

@@ -118,6 +118,24 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             return new Response(JSON.stringify({ images }), { status: 200, headers: { 'Content-Type': 'application/json' } });
         }
 
+        case 'generateWithReference': {
+            const textPart = { text: body.prompt };
+            const imageParts = (body.images as string[]).map((imgDataUrl: string) => {
+                const { mimeType, data } = parseDataUrl(imgDataUrl);
+                return { inlineData: { data, mimeType } };
+            });
+        
+            const allParts = [...imageParts, textPart ];
+        
+            const response = await ai.models.generateContent({
+              model: 'gemini-2.5-flash-image-preview',
+              contents: { parts: allParts },
+              config: { responseModalities: [Modality.IMAGE, Modality.TEXT] },
+            });
+            const result = processApiResponse(response);
+            return new Response(JSON.stringify(result), { status: 200, headers: { 'Content-Type': 'application/json' } });
+        }
+
         default:
             return new Response(JSON.stringify({ error: 'Invalid action' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
     }
