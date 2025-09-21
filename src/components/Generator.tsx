@@ -1,16 +1,18 @@
-import React, { useState, useRef } from 'react';
-import { generateImages, generateWithReference } from '../services/geminiService';
+import React, { useState, useRef, useEffect } from 'react';
+import { generateImages, generateImageWithReference, generatePromptIdeas } from '../services/geminiService';
 import { DownloadIcon } from './icons/DownloadIcon';
 import { PaperAirplaneIcon } from './icons/PaperAirplaneIcon';
-import { UploadIcon } from './icons/UploadIcon';
 import { XIcon } from './icons/XIcon';
+import { ImagePlusIcon } from './icons/ImagePlusIcon';
+import { LightBulbIcon } from './icons/LightBulbIcon';
+
 
 interface GeneratorProps {
     onSendToEditor: (imageUrl: string) => void;
 }
 
-type Mode = 'no-reference' | 'with-reference';
 type AspectRatio = '1:1' | '16:9' | '9:16' | '4:3' | '3:4';
+type GeneratorMode = 'no-reference' | 'with-reference';
 
 const aspectRatios: { id: AspectRatio, name: string }[] = [
     { id: '1:1', name: 'Square' },
@@ -20,47 +22,79 @@ const aspectRatios: { id: AspectRatio, name: string }[] = [
     { id: '3:4', name: 'Vertical' },
 ];
 
-const imageCounts = [1, 2, 3, 4];
-
 export const Generator: React.FC<GeneratorProps> = ({ onSendToEditor }) => {
-    const [mode, setMode] = useState<Mode>('no-reference');
     const [prompt, setPrompt] = useState('');
-    const [referenceImages, setReferenceImages] = useState<File[]>([]);
     const [aspectRatio, setAspectRatio] = useState<AspectRatio>('1:1');
     const [numberOfImages, setNumberOfImages] = useState(1);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [generatedImages, setGeneratedImages] = useState<string[]>([]);
+    const [mode, setMode] = useState<GeneratorMode>('no-reference');
+    const [referenceImages, setReferenceImages] = useState<File[]>([]);
+    const [referenceImageUrls, setReferenceImageUrls] = useState<string[]>([]);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
-    const handleModeChange = (newMode: Mode) => {
+    // State for the prompt idea generator
+    const [isIdeaFormOpen, setIsIdeaFormOpen] = useState(false);
+    const [productName, setProductName] = useState('');
+    const [productPosition, setProductPosition] = useState('');
+    const [additionalInfo, setAdditionalInfo] = useState('');
+    const [promptIdeas, setPromptIdeas] = useState<string[]>([]);
+    const [isGeneratingIdeas, setIsGeneratingIdeas] = useState(false);
+    const [ideaError, setIdeaError] = useState<string | null>(null);
+
+
+    // Effect to revoke object URLs to prevent memory leaks
+    useEffect(() => {
+        return () => {
+            referenceImageUrls.forEach(url => URL.revokeObjectURL(url));
+        };
+    }, [referenceImageUrls]);
+    
+    const handleModeChange = (newMode: GeneratorMode) => {
         setMode(newMode);
+        // Reset state when switching modes
+        setPrompt('');
         setError(null);
         setGeneratedImages([]);
         setReferenceImages([]);
-        setPrompt('');
+        setReferenceImageUrls([]);
+        // Reset idea generator state
+        setIsIdeaFormOpen(false);
+        setPromptIdeas([]);
+        setIdeaError(null);
+        setProductName('');
+        setProductPosition('');
+        setAdditionalInfo('');
     };
-
-    const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    
+    const handleReferenceImageChange = (event: React.ChangeEvent<HTMLInputElement>) => {
         if (event.target.files) {
-            setReferenceImages(prev => [...prev, ...Array.from(event.target.files)]);
-            // Reset the input value to allow uploading the same file again
-            event.target.value = '';
+            const files = Array.from(event.target.files);
+            const urls = files.map(file => URL.createObjectURL(file));
+            setReferenceImages(prev => [...prev, ...files]);
+            setReferenceImageUrls(prev => [...prev, ...urls]);
         }
     };
 
-    const removeReferenceImage = (index: number) => {
-        setReferenceImages(prev => prev.filter((_, i) => i !== index));
+    const handleRemoveReferenceImage = (indexToRemove: number) => {
+        // Revoke the specific URL before removing it from state
+        URL.revokeObjectURL(referenceImageUrls[indexToRemove]);
+        setReferenceImages(prev => prev.filter((_, index) => index !== indexToRemove));
+        setReferenceImageUrls(prev => prev.filter((_, index) => index !== indexToRemove));
     };
+
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
+        
         if (!prompt.trim()) {
             setError("Please enter a prompt.");
             return;
         }
-        if (mode === 'with-reference' && referenceImages.length === 0) {
-            setError("Please upload at least one reference image.");
+
+        if (numberOfImages < 1 || numberOfImages > 10) {
+            setError("Number of images must be between 1 and 10.");
             return;
         }
 
@@ -69,22 +103,56 @@ export const Generator: React.FC<GeneratorProps> = ({ onSendToEditor }) => {
         setGeneratedImages([]);
 
         try {
+            let images: string[] = [];
             if (mode === 'no-reference') {
-                const images = await generateImages(prompt, numberOfImages, aspectRatio);
-                setGeneratedImages(images);
+                images = await generateImages(prompt, numberOfImages, aspectRatio);
             } else {
-                const result = await generateWithReference(prompt, referenceImages);
-                if (result.image) {
-                    setGeneratedImages([result.image]);
-                } else {
-                    setError(result.text || "The AI could not generate an image from your request. Please try again.");
+                if (referenceImages.length === 0) {
+                    setError("Please upload at least one reference image.");
+                    setIsLoading(false);
+                    return;
                 }
+                // Generate multiple images by calling the service function in parallel
+                const imagePromises = Array.from({ length: numberOfImages }, () => 
+                    generateImageWithReference(referenceImages, prompt, aspectRatio)
+                );
+                const results = await Promise.all(imagePromises);
+                images = results.flat(); // Flatten the array of arrays which each contain one image
             }
+            setGeneratedImages(images);
         } catch (e) {
             setError(e instanceof Error ? e.message : "An unknown error occurred.");
         } finally {
             setIsLoading(false);
         }
+    };
+    
+    const handleGenerateIdeas = async (e: React.MouseEvent) => {
+        e.preventDefault();
+        setIsGeneratingIdeas(true);
+        setIdeaError(null);
+        setPromptIdeas([]);
+
+        try {
+            let formData = { productName: '', productPosition: '', additionalInfo: '' };
+            let imagesToAnalyze: File[] = [];
+
+            if (mode === 'no-reference') {
+                formData = { productName, productPosition, additionalInfo };
+            } else { // mode === 'with-reference'
+                imagesToAnalyze = referenceImages;
+            }
+            const ideas = await generatePromptIdeas(formData, imagesToAnalyze);
+            setPromptIdeas(ideas);
+        } catch (e) {
+            setIdeaError(e instanceof Error ? e.message : "Could not generate ideas.");
+        } finally {
+            setIsGeneratingIdeas(false);
+        }
+    };
+
+    const handleIdeaClick = (idea: string) => {
+        setPrompt(idea);
     };
 
     const handleDownload = (imageUrl: string, index: number) => {
@@ -96,77 +164,254 @@ export const Generator: React.FC<GeneratorProps> = ({ onSendToEditor }) => {
         document.body.removeChild(link);
     };
 
+    const handleNumberOfImagesChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const rawValue = e.target.value;
+        // Allow the user to clear the input. We'll represent empty as 0 in state temporarily.
+        if (rawValue === '') {
+            setNumberOfImages(0);
+            return;
+        }
+        const value = parseInt(rawValue, 10);
+        // Allow typing any non-negative integer. Validation will happen on blur or submit.
+        if (!isNaN(value) && value >= 0) {
+            setNumberOfImages(value);
+        }
+    };
+    
+    const handleNumberOfImagesBlur = (e: React.FocusEvent<HTMLInputElement>) => {
+        let value = parseInt(e.target.value, 10);
+
+        if (isNaN(value) || value < 1) {
+            value = 1;
+        } else if (value > 10) {
+            value = 10;
+        }
+        
+        setNumberOfImages(value);
+    }
+    
+    const renderIdeaGeneratorResults = () => {
+        if (ideaError) {
+            return <p className="text-red-500 text-sm text-center mt-4">{ideaError}</p>;
+        }
+        
+        if (promptIdeas.length > 0) {
+            return (
+                <div className="space-y-2 pt-4 mt-4 border-t border-gray-200 dark:border-gray-700">
+                    <h4 className="font-semibold text-md">Click an idea to use it:</h4>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                        {promptIdeas.map((idea, index) => (
+                            <button
+                                key={index}
+                                type="button"
+                                onClick={() => handleIdeaClick(idea)}
+                                className="text-left text-sm p-3 bg-gray-100 dark:bg-gray-800 rounded-md hover:bg-gray-200 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-gray-400 dark:focus:ring-gray-500 transition-colors"
+                            >
+                                {idea}
+                            </button>
+                        ))}
+                    </div>
+                </div>
+            );
+        }
+        return null;
+    }
+
+
     return (
         <div className="w-full flex flex-col items-center space-y-4 max-w-4xl">
             <div className="w-full bg-gray-50 dark:bg-gray-950 p-6 rounded-lg">
-                <div className="flex justify-center space-x-1 mb-6 p-1 bg-gray-200 dark:bg-gray-800 rounded-full">
-                    <button onClick={() => handleModeChange('no-reference')} className={`px-5 py-1.5 rounded-full text-sm font-medium transition-colors w-1/2 ${mode === 'no-reference' ? 'bg-white text-black shadow-sm dark:bg-black dark:text-white' : 'text-gray-500 hover:text-black dark:text-gray-400 dark:hover:text-white'}`}>
-                        No Reference
-                    </button>
-                    <button onClick={() => handleModeChange('with-reference')} className={`px-5 py-1.5 rounded-full text-sm font-medium transition-colors w-1/2 ${mode === 'with-reference' ? 'bg-white text-black shadow-sm dark:bg-black dark:text-white' : 'text-gray-500 hover:text-black dark:text-gray-400 dark:hover:text-white'}`}>
-                        With Reference
-                    </button>
-                </div>
-
                 <form onSubmit={handleSubmit} className="space-y-4">
-                    {mode === 'with-reference' && (
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Reference Images</label>
-                            <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-2 mb-4">
-                                {referenceImages.map((file, index) => (
-                                    <div key={index} className="relative aspect-square group">
-                                        <img src={URL.createObjectURL(file)} alt={`reference ${index}`} className="w-full h-full object-cover rounded-md" />
-                                        <button type="button" onClick={() => removeReferenceImage(index)} className="absolute -top-1 -right-1 bg-red-500 text-white rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                                            <XIcon className="w-4 h-4" />
-                                        </button>
-                                    </div>
-                                ))}
-                                <input ref={fileInputRef} type="file" multiple accept="image/*" onChange={handleFileChange} className="hidden" />
-                                <button type="button" onClick={() => fileInputRef.current?.click()} className="flex flex-col items-center justify-center aspect-square bg-gray-100 dark:bg-gray-800 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors">
-                                    <UploadIcon className="w-6 h-6 text-gray-500" />
-                                    <span className="text-xs text-gray-500 mt-1">Add</span>
-                                </button>
-                            </div>
+                    
+                    {mode === 'no-reference' && (
+                         <div className="w-full mb-4">
+                            <button
+                                type="button"
+                                onClick={() => setIsIdeaFormOpen(!isIdeaFormOpen)}
+                                className="w-full flex items-center justify-center gap-2 px-6 py-3 bg-gray-200 dark:bg-gray-800 font-semibold rounded-md hover:bg-gray-300 dark:hover:bg-gray-700 transition-colors"
+                            >
+                                <LightBulbIcon className="w-5 h-5" />
+                                <span>Generate Prompt Ideas</span>
+                            </button>
                         </div>
                     )}
-                    
+
+                    {mode === 'no-reference' && isIdeaFormOpen && (
+                        <div className="w-full p-4 mb-4 border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-900 space-y-4">
+                            <h3 className="font-semibold text-lg">Prompt Idea Helper</h3>
+                            <div className="space-y-3">
+                                <div>
+                                    <label htmlFor="product-name" className="block text-sm font-medium text-gray-700 dark:text-gray-300">Product Name</label>
+                                    <input
+                                        type="text"
+                                        id="product-name"
+                                        value={productName}
+                                        onChange={(e) => setProductName(e.target.value)}
+                                        placeholder="e.g., Handmade leather shoes"
+                                        className="mt-1 w-full px-3 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-md focus:outline-none focus:ring-1 focus:ring-gray-400 dark:focus:ring-gray-500"
+                                    />
+                                </div>
+                                <div>
+                                    <label htmlFor="product-position" className="block text-sm font-medium text-gray-700 dark:text-gray-300">Product Position / Action</label>
+                                    <input
+                                        type="text"
+                                        id="product-position"
+                                        value={productPosition}
+                                        onChange={(e) => setProductPosition(e.target.value)}
+                                        placeholder="e.g., Placed on a rustic wooden table"
+                                        className="mt-1 w-full px-3 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-md focus:outline-none focus:ring-1 focus:ring-gray-400 dark:focus:ring-gray-500"
+                                    />
+                                </div>
+                                <div>
+                                    <label htmlFor="additional-info" className="block text-sm font-medium text-gray-700 dark:text-gray-300">Additional Details</label>
+                                    <textarea
+                                        id="additional-info"
+                                        value={additionalInfo}
+                                        onChange={(e) => setAdditionalInfo(e.target.value)}
+                                        placeholder="Style, background, mood, colors, etc."
+                                        rows={3}
+                                        className="mt-1 w-full px-3 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-md focus:outline-none focus:ring-1 focus:ring-gray-400 dark:focus:ring-gray-500 resize-none"
+                                    />
+                                </div>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={handleGenerateIdeas}
+                                disabled={isGeneratingIdeas}
+                                className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-black text-white dark:bg-white dark:text-black font-semibold rounded-md hover:bg-gray-800 dark:hover:bg-gray-200 disabled:bg-gray-400 dark:disabled:bg-gray-600 disabled:cursor-not-allowed transition-colors"
+                            >
+                                {isGeneratingIdeas ? (
+                                    <>
+                                        <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-current"></div>
+                                        <span>Generating Ideas...</span>
+                                    </>
+                                ) : "Generate 4 Ideas"}
+                            </button>
+                            {renderIdeaGeneratorResults()}
+                        </div>
+                    )}
+
+                    <div className="flex justify-center space-x-2 mb-4 p-1 bg-gray-200 dark:bg-gray-800 rounded-full">
+                        <button
+                            type="button"
+                            onClick={() => handleModeChange('no-reference')}
+                            className={`px-6 py-2 rounded-full text-sm font-semibold transition-colors ${mode === 'no-reference' ? 'bg-black text-white dark:bg-white dark:text-black' : 'text-gray-600 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-700'}`}
+                        >
+                            No Reference
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => handleModeChange('with-reference')}
+                            className={`px-6 py-2 rounded-full text-sm font-semibold transition-colors ${mode === 'with-reference' ? 'bg-black text-white dark:bg-white dark:text-black' : 'text-gray-600 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-700'}`}
+                        >
+                            With Reference
+                        </button>
+                    </div>
+
+                    {mode === 'with-reference' && (
+                        <div className="space-y-4">
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Reference Images</label>
+                                 <input
+                                    type="file"
+                                    ref={fileInputRef}
+                                    onChange={handleReferenceImageChange}
+                                    className="hidden"
+                                    accept="image/png, image/jpeg, image/webp"
+                                    multiple
+                                />
+                                <div 
+                                    onClick={() => fileInputRef.current?.click()}
+                                    className="w-full border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg p-6 text-center cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+                                >
+                                    <ImagePlusIcon className="w-8 h-8 mx-auto text-gray-400 dark:text-gray-500 mb-2" />
+                                    <p className="text-sm text-gray-600 dark:text-gray-400">Click to upload images</p>
+                                </div>
+                            </div>
+                            {referenceImageUrls.length > 0 && (
+                                <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-2">
+                                    {referenceImageUrls.map((url, index) => (
+                                        <div key={index} className="relative group aspect-square">
+                                            <img src={url} alt={`Reference ${index + 1}`} className="w-full h-full object-cover rounded-md"/>
+                                            <button 
+                                                type="button"
+                                                onClick={() => handleRemoveReferenceImage(index)}
+                                                className="absolute top-1 right-1 bg-black/50 text-white rounded-full p-0.5 opacity-0 group-hover:opacity-100 hover:bg-black/80 transition-opacity"
+                                                aria-label="Remove image"
+                                            >
+                                                <XIcon className="w-4 h-4" />
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                             {referenceImages.length > 0 && (
+                                <div className="w-full pt-4 border-t border-gray-200 dark:border-gray-700">
+                                    <button
+                                        type="button"
+                                        onClick={handleGenerateIdeas}
+                                        disabled={isGeneratingIdeas}
+                                        className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-gray-200 dark:bg-gray-800 font-semibold rounded-md hover:bg-gray-300 dark:hover:bg-gray-700 disabled:opacity-50 transition-colors"
+                                    >
+                                        {isGeneratingIdeas ? (
+                                            <>
+                                                <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-current"></div>
+                                                <span>Generating Ideas...</span>
+                                            </>
+                                        ) : (
+                                            <>
+                                                <LightBulbIcon className="w-5 h-5" />
+                                                <span>Generate Prompt Ideas from Images</span>
+                                            </>
+                                        )}
+                                    </button>
+                                    {renderIdeaGeneratorResults()}
+                                </div>
+                            )}
+                        </div>
+                    )}
+
                     <div>
                         <label htmlFor="prompt-input" className="sr-only">Image Prompt</label>
                         <textarea
                             id="prompt-input"
                             value={prompt}
                             onChange={(e) => setPrompt(e.target.value)}
-                            placeholder={mode === 'no-reference' ? "A vibrant oil painting of a robot..." : "Describe what you want to generate based on the references..."}
+                            placeholder={mode === 'no-reference' ? "A vibrant oil painting of a futuristic city..." : "A person wearing a spacesuit, similar style..."}
                             className="w-full px-4 py-3 text-base bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-md focus:outline-none focus:ring-2 focus:ring-gray-400 dark:focus:ring-gray-500 transition-shadow resize-none"
                             rows={3}
                             disabled={isLoading}
                         />
                     </div>
 
-                    {mode === 'no-reference' && (
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Aspect Ratio</label>
-                                <div className="flex flex-wrap gap-2">
-                                    {aspectRatios.map(ratio => (
-                                        <button key={ratio.id} type="button" onClick={() => setAspectRatio(ratio.id)} disabled={isLoading} className={`px-3 py-1.5 text-sm rounded-md transition-colors ${aspectRatio === ratio.id ? 'bg-black text-white dark:bg-white dark:text-black' : 'bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600'}`}>
-                                            {ratio.name} ({ratio.id})
-                                        </button>
-                                    ))}
-                                </div>
-                            </div>
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Number of Images</label>
-                                <div className="flex flex-wrap gap-2">
-                                    {imageCounts.map(count => (
-                                        <button key={count} type="button" onClick={() => setNumberOfImages(count)} disabled={isLoading} className={`w-10 h-10 text-sm rounded-md transition-colors ${numberOfImages === count ? 'bg-black text-white dark:bg-white dark:text-black' : 'bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600'}`}>
-                                            {count}
-                                        </button>
-                                    ))}
-                                </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Aspect Ratio</label>
+                            <div className="flex flex-wrap gap-2">
+                                {aspectRatios.map(ratio => (
+                                    <button key={ratio.id} type="button" onClick={() => setAspectRatio(ratio.id)} disabled={isLoading} className={`px-3 py-1.5 text-sm rounded-md transition-colors ${aspectRatio === ratio.id ? 'bg-black text-white dark:bg-white dark:text-black' : 'bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600'}`}>
+                                        {ratio.name} ({ratio.id})
+                                    </button>
+                                ))}
                             </div>
                         </div>
-                    )}
+                        <div>
+                            <label htmlFor="image-count-input" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                                Number of Images
+                            </label>
+                            <input
+                                id="image-count-input"
+                                type="number"
+                                min="1"
+                                max="10"
+                                value={numberOfImages === 0 ? '' : numberOfImages}
+                                onChange={handleNumberOfImagesChange}
+                                onBlur={handleNumberOfImagesBlur}
+                                disabled={isLoading}
+                                className="w-full px-3 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-md focus:outline-none focus:ring-2 focus:ring-gray-400 dark:focus:ring-gray-500 transition-shadow disabled:opacity-50 disabled:cursor-not-allowed"
+                            />
+                        </div>
+                    </div>
                     
                     <button
                         type="submit"
@@ -212,6 +457,7 @@ export const Generator: React.FC<GeneratorProps> = ({ onSendToEditor }) => {
                     </div>
                 )}
             </div>
+
         </div>
     );
 };
